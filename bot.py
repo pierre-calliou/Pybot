@@ -1,20 +1,22 @@
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 from discord import app_commands
 import json
 import os
-import asyncio
-from datetime import datetime, timezone
 import aiohttp
+from datetime import datetime, timezone, timedelta
+from keep_alive import keep_alive
+
+
 
 # Configuration
 TOKEN = "MTM0NjQyMjU1Mjc2Njk3MTk0NA.GpUEiX.dltwkoCgUA_FNuhQ5KvyskXUp0q5hik6M_v1Ck"
 OPENROUTER_API_KEY = "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"
 MODEL = "cognitivecomputations/dolphin-mistral-24b-venice-edition:free"
 WEBHOOK_URL = "https://discord.com/api/webhooks/1396830542539919485/BPOKblFAWPZk72Qf7LtIlyojSsKvDHzo26QjyyMSE8cyQnHEWkTU0zcZCm_0JDH8EXJT"
-GUILD_ID = 1339652496284586055  # Ton serveur de test pour synchronisation
+GUILD_ID = 1339652496284586055  # Serveur de test
 
-# Initialisation
+# Intents et bot
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 data_file = "data.json"
@@ -27,23 +29,62 @@ if not os.path.exists(data_file):
 with open(data_file, "r") as f:
     data = json.load(f)
 
-# Sauvegarde
+# Sauvegarde des données
 async def save_data():
     with open(data_file, "w") as f:
         json.dump(data, f, indent=2)
 
-# Vérifie que la commande est utilisée dans un serveur (pas en DM)
+# Vérifie contexte serveur (pas en DM)
 def is_guild_context(interaction: discord.Interaction):
     return interaction.guild is not None
 
-# Log uniquement certaines commandes (admin et achat)
+# Récupère ou initialise les données utilisateur
+def get_user_data(user_id):
+    if str(user_id) not in data:
+        data[str(user_id)] = {
+            "credits": 10,
+            "money": 0,
+            "history": [],
+            "last_reset": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "has_pass": False,
+            "pass_expiry": None,
+            "last_daily": None,
+        }
+    return data[str(user_id)]
+
+# Fonction de log améliorée
 async def log_command(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    user_name = str(interaction.user)
+    guild_id = interaction.guild.id if interaction.guild else "DM"
+    guild_name = interaction.guild.name if interaction.guild else "DM"
+    command_name = interaction.command.name if interaction.command else "inconnu"
+
+    # Récupération des arguments
+    args = []
+    if interaction.data and "options" in interaction.data:
+        for opt in interaction.data["options"]:
+            args.append(f"{opt['name']}={opt.get('value', '')}")
+    args_str = ", ".join(args) if args else "aucun"
+
+    user_data = get_user_data(user_id)
+    credits = user_data.get("credits", "inconnu")
+    money = user_data.get("money", "inconnu")
+    has_pass = user_data.get("has_pass", False)
+    pass_expiry = user_data.get("pass_expiry", "aucun")
+    if pass_expiry is not None:
+        pass_expiry = str(pass_expiry)
+
     embed = {
         "title": "📌 Commande exécutée",
         "fields": [
-            {"name": "Utilisateur", "value": f"{interaction.user} (ID: {interaction.user.id})", "inline": True},
-            {"name": "Commande", "value": f"/{interaction.command.name}", "inline": True},
-            {"name": "Serveur", "value": f"{interaction.guild.name} (ID: {interaction.guild.id})", "inline": True},
+            {"name": "Utilisateur", "value": f"{user_name} (ID: {user_id})", "inline": True},
+            {"name": "Serveur", "value": f"{guild_name} (ID: {guild_id})", "inline": True},
+            {"name": "Commande", "value": f"/{command_name} ({args_str})", "inline": False},
+            {"name": "Crédits", "value": str(credits), "inline": True},
+            {"name": "Argent", "value": f"{money}€", "inline": True},
+            {"name": "Pass actif", "value": "Oui" if has_pass else "Non", "inline": True},
+            {"name": "Expiration pass", "value": pass_expiry, "inline": False},
         ],
         "timestamp": datetime.utcnow().isoformat(),
         "color": 0x00FF00
@@ -54,13 +95,7 @@ async def log_command(interaction: discord.Interaction):
     except Exception as e:
         print(f"[LOGGING ERROR] Impossible d’envoyer au webhook : {e}")
 
-# Utilitaires
-def get_user_data(user_id):
-    if str(user_id) not in data:
-        data[str(user_id)] = {"credits": 10, "money": 0, "history": [], "last_reset": datetime.now(timezone.utc).strftime("%Y-%m-%d")}
-    return data[str(user_id)]
-
-# Événement ready + sync commands
+# Ready + sync commandes
 @bot.event
 async def on_ready():
     guild = discord.Object(id=GUILD_ID)
@@ -77,11 +112,29 @@ async def ask(interaction: discord.Interaction, question: str):
         return
 
     user_data = get_user_data(interaction.user.id)
-    if user_data["credits"] <= 0:
-        await interaction.response.send_message("❌ Tu n’as plus de crédits.", ephemeral=True)
-        return
 
-    user_data["credits"] -= 1
+    # Si pass actif et valide, pas besoin de crédits
+    if user_data["has_pass"]:
+        expiry = user_data.get("pass_expiry")
+        if expiry is not None:
+            expiry_dt = datetime.fromisoformat(expiry)
+            if expiry_dt < datetime.now(timezone.utc):
+                # Pass expiré
+                user_data["has_pass"] = False
+                user_data["pass_expiry"] = None
+            else:
+                # Pass valide, on n'enlève pas de crédit
+                pass
+        else:
+            # Pas d'expiry valide, on désactive pass
+            user_data["has_pass"] = False
+
+    if not user_data["has_pass"]:
+        if user_data["credits"] <= 0:
+            await interaction.response.send_message("❌ Tu n’as plus de crédits.", ephemeral=True)
+            return
+        user_data["credits"] -= 1
+
     user_data["history"].append({"role": "user", "content": question})
 
     headers = {
@@ -106,7 +159,9 @@ async def ask(interaction: discord.Interaction, question: str):
             except Exception as e:
                 print("Erreur JSON:", e)
                 reply = "❌ Erreur IA ou modèle indisponible."
-                user_data["credits"] += 1
+                if not user_data["has_pass"]:
+                    user_data["credits"] += 1
+
     user_data["history"].append({"role": "assistant", "content": reply})
     await save_data()
     await interaction.response.send_message(f"🤖 Réponse IA : {reply}", ephemeral=True)
@@ -117,10 +172,13 @@ async def stats(interaction: discord.Interaction):
         await interaction.response.send_message("❌ Cette commande n’est pas disponible en message privé.", ephemeral=True)
         return
     user_data = get_user_data(interaction.user.id)
+    has_pass = user_data.get("has_pass", False)
+    pass_expiry = user_data.get("pass_expiry", "aucun")
     await interaction.response.send_message(
-        f"💰 Argent : {user_data['money']}\n🔋 Crédits : {user_data['credits']}", ephemeral=True)
+        f"💰 Argent : {user_data['money']}\n🔋 Crédits : {user_data['credits']}\n🎫 Pass mensuel actif : {'Oui' if has_pass else 'Non'} (exp: {pass_expiry})",
+        ephemeral=True)
 
-@bot.tree.command(name="daily", description="Recevoir 100€ par jour")
+@bot.tree.command(name="daily", description="Recevoir 10€ par jour")
 async def daily(interaction: discord.Interaction):
     if not is_guild_context(interaction):
         await interaction.response.send_message("❌ Cette commande n’est pas disponible en message privé.", ephemeral=True)
@@ -130,10 +188,10 @@ async def daily(interaction: discord.Interaction):
     if user_data.get("last_daily") == today:
         await interaction.response.send_message("🕐 Tu as déjà récupéré ta récompense aujourd’hui !", ephemeral=True)
         return
-    user_data["money"] += 100
+    user_data["money"] += 10
     user_data["last_daily"] = today
     await save_data()
-    await interaction.response.send_message("🎉 Tu as reçu 100€ !", ephemeral=True)
+    await interaction.response.send_message("🎉 Tu as reçu 10€ !", ephemeral=True)
 
 @bot.tree.command(name="buycredits", description="Acheter plusieurs crédits IA pour 50€ chacun")
 @app_commands.describe(amount="Nombre de crédits à acheter")
@@ -163,6 +221,32 @@ async def buycredits(interaction: discord.Interaction, amount: int):
     # Log achat
     await log_command(interaction)
 
+@bot.tree.command(name="buypass", description="Acheter un pass mensuel à 10 000€ pour discuter sans crédits")
+async def buypass(interaction: discord.Interaction):
+    if not is_guild_context(interaction):
+        await interaction.response.send_message("❌ Cette commande n’est pas disponible en message privé.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    user_data = get_user_data(interaction.user.id)
+    prix_pass = 10000
+
+    if user_data["money"] < prix_pass:
+        await interaction.followup.send(f"❌ Pas assez d’argent. Il faut {prix_pass}€ pour acheter le pass.")
+        return
+
+    # Active le pass pour 30 jours à partir de maintenant
+    user_data["money"] -= prix_pass
+    user_data["has_pass"] = True
+    user_data["pass_expiry"] = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+    await save_data()
+
+    await interaction.followup.send(f"✅ Pass mensuel activé ! Tu peux maintenant discuter sans utiliser de crédits pendant 30 jours.")
+
+    # Log achat pass
+    await log_command(interaction)
+
 @bot.tree.command(name="addmoney", description="[ADMIN] Donner de l’argent à un utilisateur")
 @app_commands.describe(user="Utilisateur à créditer", amount="Montant à ajouter")
 async def addmoney(interaction: discord.Interaction, user: discord.User, amount: int):
@@ -173,6 +257,7 @@ async def addmoney(interaction: discord.Interaction, user: discord.User, amount:
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ Tu n’es pas admin.", ephemeral=True)
         return
+
     user_data = get_user_data(user.id)
     user_data["money"] += amount
     await save_data()
@@ -191,6 +276,7 @@ async def removemoney(interaction: discord.Interaction, user: discord.User, amou
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ Tu n’es pas admin.", ephemeral=True)
         return
+
     user_data = get_user_data(user.id)
     user_data["money"] = max(0, user_data["money"] - amount)
     await save_data()
@@ -204,6 +290,7 @@ async def clearhistory(interaction: discord.Interaction):
     if not is_guild_context(interaction):
         await interaction.response.send_message("❌ Cette commande n’est pas disponible en message privé.", ephemeral=True)
         return
+
     user_data = get_user_data(interaction.user.id)
     user_data["history"] = []
     await save_data()
@@ -218,14 +305,15 @@ async def help(interaction: discord.Interaction):
 📖 **Commandes disponibles :**
 
 /ask [question] - Pose une question à l’IA
-/stats - Voir tes crédits et ton argent
-/daily - Gagner 100€ par jour
+/stats - Voir tes crédits, argent, et pass mensuel
+/daily - Gagner 10€ par jour
 /buycredits - Acheter crédits IA pour 50€ chacun
+/buypass - Acheter un pass mensuel à 10 000€ pour discuter sans crédits
 /clearhistory - Supprimer ton historique IA
 /addmoney - [ADMIN] Donner de l’argent à un membre
 /removemoney - [ADMIN] Retirer de l’argent à un membre
 /help - Voir cette aide
 """
     await interaction.response.send_message(message, ephemeral=True)
-
+    
 bot.run(TOKEN)
