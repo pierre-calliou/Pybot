@@ -1,0 +1,40 @@
+{
+  "1336388756722417665": {
+    "credits": 19,
+    "last_reset": "2025-07-21",
+    "money": 99050,
+    "history": [
+      {
+        "role": "user",
+        "content": "coucou"
+      },
+      {
+        "role": "assistant",
+        "content": "\u274c Erreur IA ou mod\u00e8le indisponible."
+      },
+      {
+        "role": "user",
+        "content": "coucou"
+      },
+      {
+        "role": "assistant",
+        "content": "\u274c Erreur IA ou mod\u00e8le indisponible."
+      },
+      {
+        "role": "user",
+        "content": "coucou"
+      },
+      {
+        "role": "assistant",
+        "content": "Salut ! Comment \u00e7a va ?"
+      }
+    ],
+    "last_daily": "2025-07-21"
+  },
+  "1346422552766971944": {
+    "credits": 10,
+    "money": 0,
+    "history": [],
+    "last_reset": "2025-07-21"
+  }
+}
